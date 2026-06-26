@@ -7,7 +7,7 @@
 <p align="center"><strong>A browser-based ontology workbench built with Streamlit and rdflib</strong></p>
 
 [![GitHub stars](https://img.shields.io/github/stars/ralforion/orionbelt-ontology-builder?style=social)](https://github.com/ralforion/orionbelt-ontology-builder)
-[![Version 1.5.0](https://img.shields.io/badge/version-1.5.0-purple.svg)](https://github.com/ralforion/orionbelt-ontology-builder/releases)
+[![Version 1.5.1](https://img.shields.io/badge/version-1.5.1-purple.svg)](https://github.com/ralforion/orionbelt-ontology-builder/releases)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](https://github.com/ralforion/orionbelt-ontology-builder/blob/main/LICENSE)
 
@@ -147,7 +147,7 @@ A prebuilt image is published to Docker Hub. No local Python setup required:
 docker run --rm -p 8501:8501 ralforion/orionbelt-ontology-builder
 ```
 
-Then open http://localhost:8501. Use `:1.5.0` to pin a specific version instead of `latest`.
+Then open http://localhost:8501. Use `:1.5.1` to pin a specific version instead of `latest`.
 
 To build the image yourself from a checkout:
 
@@ -157,6 +157,26 @@ docker run --rm -p 8501:8501 ralforion/orionbelt-ontology-builder
 ```
 
 The container runs Streamlit headless on `0.0.0.0:8501` as a non-root user.
+
+### Upload size limit
+
+Imported files are capped at **200 MB** by default (Streamlit's `maxUploadSize`).
+To import larger ontologies, raise the limit in `.streamlit/config.toml`:
+
+```toml
+[server]
+maxUploadSize = 1000   # MB
+```
+
+or pass it at launch:
+
+```bash
+streamlit run app.py --server.maxUploadSize 1000
+```
+
+Parsing happens in memory, so the practical ceiling is the host machine's
+available RAM rather than this setting. The hosted demo is RAM-limited and keeps
+the 200 MB default; raise the value only when self-hosting with enough memory.
 
 ---
 
