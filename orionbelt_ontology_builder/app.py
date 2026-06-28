@@ -88,6 +88,26 @@ _CUSTOM_CSS = """
 </style>
 """
 
+# In dark mode the brand navy primary (#0D2B7A) reads fine as a filled
+# button/checkbox but is too dark as the *text/indicator* colour on the selected
+# tab and segmented-control pill. Lighten just those to a readable blue; only
+# injected when the active theme is dark.
+_DARK_ACCENT = "#6EA8FE"
+_DARK_CSS = f"""
+<style>
+    [data-testid="stBaseButton-segmented_controlActive"] {{
+        color: {_DARK_ACCENT} !important;
+        border-color: {_DARK_ACCENT} !important;
+    }}
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {{
+        color: {_DARK_ACCENT} !important;
+    }}
+    .stTabs [data-baseweb="tab-highlight"] {{
+        background-color: {_DARK_ACCENT} !important;
+    }}
+</style>
+"""
+
 
 def _configure_page() -> None:
     """Apply page config and custom CSS. Called from main() so it fires on
@@ -102,6 +122,11 @@ def _configure_page() -> None:
         )
         st.session_state["_page_configured"] = True
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
+    try:
+        if st.context.theme.get("type") == "dark":
+            st.markdown(_DARK_CSS, unsafe_allow_html=True)
+    except Exception:
+        pass
     if "app_started" not in st.session_state:
         st.session_state.app_started = True
         logger.info(f"{APP_NAME} v{APP_VERSION}")
@@ -5980,11 +6005,30 @@ def render_visualization():
                 "graph_viewer", path=_component_path
             )
 
+            # Theme the graph (canvas + legend) to match the app, so it isn't a
+            # white box in dark mode. Standard Streamlit dark/light colours are
+            # used, derived from the active theme type (issue #62).
+            _gv_dark = False
+            try:
+                _gv_dark = st.context.theme.get("type") == "dark"
+            except Exception:
+                pass
+            _gv_theme = (
+                {"bg": "#0e1117", "panel": "#262730", "text": "#fafafa"}
+                if _gv_dark
+                else {
+                    "bg": "#ffffff",
+                    "panel": "rgba(255,255,255,0.92)",
+                    "text": "#333333",
+                }
+            )
+
             selection = _graph_component(
                 nodes=gdata["nodes"],
                 edges=gdata["edges"],
                 options=gdata["options"],
                 height=height,
+                theme=_gv_theme,
                 seq=st.session_state.viz_render_seq,
                 key="graph_viewer",
                 default=None,
@@ -6184,10 +6228,21 @@ def main():
 
     # Sidebar navigation — asset path resolved relative to this module so it
     # works under both `streamlit run` and `pip install` deployments.
-    _logo_path = _Path(__file__).parent / "assets" / "ORIONBELT_Logo.png"
+    # Use the white logo in dark mode so it stays legible (the colour logo is
+    # dark on transparent). st.context.theme reflects the active theme on recent
+    # Streamlit; older versions fall back to the colour logo.
+    _dark_mode = False
+    try:
+        _dark_mode = st.context.theme.type == "dark"
+    except Exception:
+        pass
+    _logo_file = "ORIONBELT Logo w.png" if _dark_mode else "ORIONBELT_Logo.png"
+    _logo_path = _Path(__file__).parent / "assets" / _logo_file
     st.sidebar.image(str(_logo_path), width=200)
     st.sidebar.markdown("# Ontology Builder")
-    st.sidebar.markdown("\u00a9 2025 [RALFORION d.o.o.](https://ralforion.com)")
+    st.sidebar.markdown(
+        "\u00a9 2025\u20132026 [RALFORION d.o.o.](https://ralforion.com)"
+    )
     _gh_repo = GITHUB_ISSUES_URL.rsplit("/", 1)[0]
     st.sidebar.markdown(
         f"<small>v{APP_VERSION} · "
