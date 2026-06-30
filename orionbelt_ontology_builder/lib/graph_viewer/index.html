@@ -101,7 +101,7 @@ function renderGraph(args) {
     var dlSvg = dlBtn.querySelector('svg');
     if (dlSvg) dlSvg.style.fill = theme.text;
 
-    var nodes = new vis.DataSet(JSON.parse(args.nodes));
+    var nodeArr = JSON.parse(args.nodes);
     var edges = new vis.DataSet(JSON.parse(args.edges));
     var options = JSON.parse(args.options);
     // Theme edge labels: light text with a background-coloured halo (not a hard
@@ -111,14 +111,42 @@ function renderGraph(args) {
     options.edges.font = Object.assign({}, options.edges.font, {
         color: theme.text, strokeColor: theme.bg, strokeWidth: 4
     });
-    // Batch stabilization: compute layout before first render, then freeze.
-    // Scale iterations with node count for quality vs speed balance.
-    var nCount = JSON.parse(args.nodes).length;
-    var iters = Math.min(Math.max(nCount * 3, 150), 500);
+    var nCount = nodeArr.length;
     options.physics = options.physics || {};
-    // Batch-stabilize most of the layout, then let it jiggle briefly for visual feedback.
-    var batchIters = Math.max(iters - 40, 80);
-    options.physics.stabilization = { enabled: true, iterations: batchIters, updateInterval: 50 };
+
+    // Cache the computed layout so a re-mount (e.g. toggling the side panel)
+    // restores node positions instantly instead of re-running physics and
+    // flickering. Keyed by the render seq + node set, so clicking Render still
+    // recomputes a fresh layout. Stored in localStorage, shared across the
+    // component's iframe instances within the session.
+    function _hash(s) {
+        var h = 0;
+        for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+        return h;
+    }
+    var nodeHash = _hash(nodeArr.map(function(n) { return n.id; }).sort().join('|'));
+    var savedPos = null;
+    try {
+        var _raw = JSON.parse(localStorage.getItem('viz_pos') || 'null');
+        if (_raw && _raw.seq === args.seq && _raw.hash === nodeHash) savedPos = _raw.pos;
+    } catch (e) {}
+
+    var usedSaved = false;
+    if (savedPos) {
+        // Render at saved positions with physics off — no stabilization, no flicker.
+        nodeArr.forEach(function(n) {
+            if (savedPos[n.id]) { n.x = savedPos[n.id].x; n.y = savedPos[n.id].y; }
+        });
+        options.physics.enabled = false;
+        usedSaved = true;
+    } else {
+        // Batch-stabilize most of the layout, then freeze. Scale iterations with
+        // node count for a quality vs speed balance.
+        var iters = Math.min(Math.max(nCount * 3, 150), 500);
+        var batchIters = Math.max(iters - 40, 80);
+        options.physics.stabilization = { enabled: true, iterations: batchIters, updateInterval: 50 };
+    }
+    var nodes = new vis.DataSet(nodeArr);
     network = new vis.Network(el, {nodes: nodes, edges: edges}, options);
     document.getElementById('download-btn').style.display = 'flex';
     // Restore the selection after a re-mount (e.g. the panel toggled), so the
@@ -127,10 +155,19 @@ function renderGraph(args) {
     if (args.selected_node !== null && args.selected_node !== undefined) {
         try { network.selectNodes([args.selected_node]); } catch (e) {}
     }
-    // After batch, let live physics run briefly for a short settle animation, then freeze.
-    network.once('stabilizationIterationsDone', function() {
-        setTimeout(function() { network.setOptions({ physics: { enabled: false } }); }, 500);
-    });
+    // After batch, freeze physics and cache the positions for instant re-mounts.
+    // Skipped when we already rendered from a saved layout.
+    if (!usedSaved) {
+        network.once('stabilizationIterationsDone', function() {
+            try {
+                localStorage.setItem(
+                    'viz_pos',
+                    JSON.stringify({seq: args.seq, hash: nodeHash, pos: network.getPositions()})
+                );
+            } catch (e) {}
+            setTimeout(function() { network.setOptions({ physics: { enabled: false } }); }, 500);
+        });
+    }
 
     // Build dynamic legend from actual nodes and edges
     var nodeColors = {};
