@@ -44,6 +44,8 @@ var visLoaded = false;
 var pendingArgs = null;
 var network = null;
 var autofitOn = false;
+var lastSeq = null;
+var lastTheme = null;
 
 // When "Fit to window" is on, fill the available window height instead of using
 // the fixed Graph Height. Reads the parent window's height and this iframe's
@@ -82,6 +84,25 @@ function downloadGraph() {
 function renderGraph(args) {
     if (!visLoaded) { pendingArgs = args; return; }
     autofitOn = !!args.autofit;
+
+    // Only rebuild the graph when the data (seq) or theme actually changes.
+    // Selection clicks trigger a Streamlit rerun + re-render with the same data;
+    // rebuilding then would reset the user's zoom/pan, so instead just update the
+    // selection and height and keep the existing network (and its viewport).
+    var themeStr = JSON.stringify(args.theme || null);
+    if (network && args.seq === lastSeq && themeStr === lastTheme) {
+        if (args.selected_node !== null && args.selected_node !== undefined) {
+            try { network.selectNodes([args.selected_node]); } catch (e) {}
+        } else {
+            try { network.unselectAll(); } catch (e) {}
+        }
+        var hh = autofitOn ? autofitHeight() : (args.height || 600);
+        if (hh) applyHeight(hh);
+        return;
+    }
+    lastSeq = args.seq;
+    lastTheme = themeStr;
+
     var height = args.height || 600;
     if (autofitOn) {
         var af = autofitHeight();
