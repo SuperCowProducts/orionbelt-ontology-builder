@@ -14,7 +14,7 @@ from pathlib import Path as _Path
 from . import local_store
 
 APP_NAME = "OrionBelt Ontology Builder"
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.14.0"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1018,6 +1018,32 @@ def build_class_options(classes: list, include_none: bool = False) -> tuple:
     return options, lookup
 
 
+def _apply_class_edit(ont, class_info, new_name, new_label, new_comment, new_parent):
+    """Apply a class edit (rename + label/comment/parent). Returns True on success.
+
+    Shared by the Edit/Delete form and the Visualization side panel. Renames
+    first so the remaining updates target the renamed class; shows an error and
+    returns False if the new name collides. The caller is responsible for the
+    undo checkpoint and rerun.
+    """
+    current_ref = class_info["uri"]
+    if new_name and new_name != class_info["name"]:
+        if ont.rename_class(class_info["uri"], new_name):
+            current_ref = new_name
+        else:
+            show_message(f"Cannot rename: '{new_name}' already exists!", "error")
+            return False
+    if class_info["parents"] and new_parent != class_info["parents"][0]:
+        ont.update_class(current_ref, remove_parent=class_info["parents"][0])
+    ont.update_class(
+        current_ref,
+        new_label=new_label,
+        new_comment=new_comment,
+        new_parent=new_parent if new_parent != "None" else None,
+    )
+    return True
+
+
 def render_dashboard():
     """Render the dashboard/overview page."""
     st.header("Dashboard")
@@ -1490,40 +1516,19 @@ def render_classes():
                         )
 
                     if update_btn:
-                        # Rename first (updates all references) so the rest of
-                        # the update targets the renamed class.
-                        current_ref = class_info["uri"]
-                        if new_name and new_name != class_info["name"]:
-                            if ont.rename_class(class_info["uri"], new_name):
-                                current_ref = new_name
-                            else:
-                                show_message(
-                                    f"Cannot rename: '{new_name}' already exists!",
-                                    "error",
-                                )
-                                st.rerun()
-
-                        # Remove old parent if changed
-                        if (
-                            class_info["parents"]
-                            and new_parent != class_info["parents"][0]
+                        if _apply_class_edit(
+                            ont,
+                            class_info,
+                            new_name,
+                            new_label,
+                            new_comment,
+                            new_parent,
                         ):
-                            ont.update_class(
-                                current_ref,
-                                remove_parent=class_info["parents"][0],
+                            save_checkpoint("Update class")
+                            show_message(
+                                f"Class '{new_name or selected_display}' updated!",
+                                "success",
                             )
-
-                        ont.update_class(
-                            current_ref,
-                            new_label=new_label,
-                            new_comment=new_comment,
-                            new_parent=new_parent if new_parent != "None" else None,
-                        )
-                        save_checkpoint("Update class")
-                        show_message(
-                            f"Class '{new_name or selected_display}' updated!",
-                            "success",
-                        )
                         st.rerun()
 
                     if delete_btn:
@@ -5074,6 +5079,7 @@ def render_visualization():
             "graph_height": 670,
             "node_spacing": 150,
             "fit": True,
+            "details_panel": False,
             "highlight_issues": False,
             "focus_mode": False,
             "focus_depth": 1,
@@ -6071,17 +6077,46 @@ def render_visualization():
                 }
             )
 
-            selection = _graph_component(
-                nodes=gdata["nodes"],
-                edges=gdata["edges"],
-                options=gdata["options"],
-                height=height,
-                autofit=fit,
-                theme=_gv_theme,
-                seq=st.session_state.viz_render_seq,
-                key="graph_viewer",
-                default=None,
-            )
+            # Last selection persisted across reruns (the graph component
+            # re-mounts when the panel toggles, which would otherwise drop it).
+            _prev_sel = st.session_state.get("_viz_last_selection")
+            _prev_has_sel = isinstance(_prev_sel, dict) and _prev_sel.get("selected")
+
+            _panel_on = bool(st.session_state.get("_viz_cfg_details_panel", True))
+            if _panel_on:
+                _col_graph, _col_panel = st.columns([3, 1])
+                _col_toggle = None
+            else:
+                # Collapsed: a thin reopen toggle on the right edge, IDE-style.
+                # It turns primary (coloured) when a node is selected, since the
+                # toggle is otherwise easy to miss.
+                _col_graph, _col_toggle = st.columns([30, 1])
+                _col_panel = None
+
+            if _col_toggle is not None:
+                with _col_toggle:
+                    if st.button(
+                        "‹",
+                        key="viz_show_panel",
+                        help="Show details panel",
+                        type="primary" if _prev_has_sel else "secondary",
+                    ):
+                        st.session_state["_viz_cfg_details_panel"] = True
+                        st.rerun()
+
+            with _col_graph:
+                selection = _graph_component(
+                    nodes=gdata["nodes"],
+                    edges=gdata["edges"],
+                    options=gdata["options"],
+                    height=height,
+                    autofit=fit,
+                    theme=_gv_theme,
+                    selected_node=(_prev_sel.get("nodeId") if _prev_has_sel else None),
+                    seq=st.session_state.viz_render_seq,
+                    key="graph_viewer",
+                    default=None,
+                )
 
             # Ctrl/Cmd-click in the graph requests focusing on a node: add it to
             # the "Focus on one node" seeds and enable focus mode (issue #56). The
@@ -6126,27 +6161,129 @@ def render_visualization():
                 "SKOS Concept": lambda n: f"view_skos_{str(abs(hash(n)))[:8]}",
             }
 
-            # Status bar with View button
-            has_selection = (
-                selection and isinstance(selection, dict) and selection.get("selected")
-            )
-            ntype = selection.get("ntype") if has_selection else None
-            ename = selection.get("ename") if has_selection else None
+            # Persist the selection so it survives the component re-mount that
+            # happens when the panel toggles (otherwise the panel would blank).
+            # A re-mount returns None (not a dict), which we ignore; only an
+            # explicit select/deselect updates the stored value.
+            if isinstance(selection, dict) and "selected" in selection:
+                st.session_state["_viz_last_selection"] = (
+                    selection if selection.get("selected") else None
+                )
+            _sel = st.session_state.get("_viz_last_selection")
+
+            # Selection details, shared by the side panel and the status bar.
+            has_selection = isinstance(_sel, dict) and _sel.get("selected")
+            ntype = _sel.get("ntype") if has_selection else None
+            ename = _sel.get("ename") if has_selection else None
             show_view = has_selection and ntype and ename and ntype in _type_to_page
 
-            if has_selection:
-                title_text = (selection.get("title") or "").replace("\n", " | ")
-                prefix = "Edge: " if selection.get("isEdge") else ""
-                sel_html = f"<b>{prefix}{selection.get('label', '')}</b> — {title_text}"
-            else:
-                sel_html = (
-                    "Click a node or edge to see details · "
-                    "Ctrl/Cmd-click a node to focus on it"
-                )
+            def _open_full_editor(_ntype, _ename):
+                """Open the entity in its editor. Classes land directly in the
+                Edit/Delete tab with the entity preselected (no scrolling); other
+                types fall back to the inline-view jump for now (issue #80)."""
+                st.session_state["_back_to_viz"] = True
+                st.session_state.search_navigate_to = _type_to_page[_ntype]
+                if _ntype == "Class":
+                    _target = next(
+                        (c for c in classes if _uid(c["uri"]) == _ename), None
+                    )
+                    if _target:
+                        _, _lookup = build_class_options(classes)
+                        _disp = {v: k for k, v in _lookup.items()}.get(_target["uri"])
+                        if _disp:
+                            st.session_state["cls_active_tab"] = "Edit/Delete Class"
+                            st.session_state["edit_class_select"] = _disp
+                            st.rerun()
+                vk = _view_key_map[_ntype](_ename)
+                st.session_state[vk] = True
+                if _ntype == "SKOS Concept":
+                    st.session_state["_skos_navigate_to_concept"] = True
+                st.rerun()
 
-            # Inject CSS to remove gap between status bar columns
-            st.markdown(
-                """<style>
+            if _panel_on:
+                with _col_panel:
+                    _h1, _h2 = st.columns([3, 1])
+                    with _h1:
+                        st.markdown("##### Details")
+                    with _h2:
+                        if st.button("›", key="viz_hide_panel", help="Hide panel"):
+                            st.session_state["_viz_cfg_details_panel"] = False
+                            st.rerun()
+                    if not has_selection:
+                        st.caption(
+                            "Click a node to see details. Ctrl/Cmd-click focuses on it."
+                        )
+                    else:
+                        st.markdown(f"**{_sel.get('label', '')}**")
+                        st.caption("Edge" if _sel.get("isEdge") else (ntype or "Node"))
+                        # Resolve the selected class (node id == _uid(uri)) so it
+                        # can be edited inline without leaving the graph (issue #80).
+                        _cls_sel = (
+                            next((c for c in classes if _uid(c["uri"]) == ename), None)
+                            if ntype == "Class" and ename
+                            else None
+                        )
+                        if _cls_sel is not None:
+                            with st.form("panel_edit_class"):
+                                _pn = st.text_input("Name", value=_cls_sel["name"])
+                                _pl = st.text_input("Label", value=_cls_sel["label"])
+                                _pc = st.text_area("Comment", value=_cls_sel["comment"])
+                                _others = [
+                                    c["name"]
+                                    for c in classes
+                                    if c["name"] != _cls_sel["name"]
+                                ]
+                                _cur = (
+                                    _cls_sel["parents"][0]
+                                    if _cls_sel["parents"]
+                                    else "None"
+                                )
+                                _pp = st.selectbox(
+                                    "Parent",
+                                    ["None"] + _others,
+                                    index=(
+                                        _others.index(_cur) + 1
+                                        if _cur in _others
+                                        else 0
+                                    ),
+                                )
+                                if st.form_submit_button(
+                                    "Save", use_container_width=True
+                                ):
+                                    if _apply_class_edit(
+                                        ont, _cls_sel, _pn, _pl, _pc, _pp
+                                    ):
+                                        save_checkpoint("Update class")
+                                        show_message("Class updated!", "success")
+                                    st.rerun()
+                            st.caption("IRI")
+                            st.code(_cls_sel["uri"], language=None)
+                        else:
+                            for _line in (_sel.get("title") or "").split("\n"):
+                                if _line.strip():
+                                    st.write(_line.strip())
+                        if show_view:
+                            if st.button(
+                                "Open full editor" if ntype == "Class" else "Open",
+                                key="panel_open_editor",
+                                use_container_width=True,
+                            ):
+                                _open_full_editor(ntype, ename)
+            else:
+                # Status bar under the graph (shown when the panel is hidden).
+                if has_selection:
+                    title_text = (_sel.get("title") or "").replace("\n", " | ")
+                    prefix = "Edge: " if _sel.get("isEdge") else ""
+                    sel_html = f"<b>{prefix}{_sel.get('label', '')}</b> — {title_text}"
+                else:
+                    sel_html = (
+                        "Click a node or edge to see details · "
+                        "Ctrl/Cmd-click a node to focus on it"
+                    )
+
+                # Inject CSS to remove gap between status bar columns
+                st.markdown(
+                    """<style>
             div[data-testid="stHorizontalBlock"]:has(#graph-status-bar) { gap: 0 !important; }
             div[data-testid="stHorizontalBlock"]:has(#graph-status-bar) [data-testid="stBaseButton-secondary"] button,
             div[data-testid="stHorizontalBlock"]:has(#graph-status-bar) button[kind] ,
@@ -6164,62 +6301,35 @@ def render_visualization():
                 background: #388E3C !important;
             }
             </style>""",
-                unsafe_allow_html=True,
-            )
+                    unsafe_allow_html=True,
+                )
 
-            if show_view:
-                col_info, col_btn = st.columns([7, 2])
-                with col_info:
+                if show_view:
+                    col_info, col_btn = st.columns([7, 2])
+                    with col_info:
+                        st.markdown(
+                            f'<div id="graph-status-bar" style="background:#1e1e1e;color:#fff;padding:6px 12px;'
+                            f"border-radius:4px 0 0 4px;font-size:14px;display:flex;align-items:center;gap:8px;"
+                            f'height:36px;">'
+                            f'<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{sel_html}</span>'
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with col_btn:
+                        _btn_label = "Open full editor" if ntype == "Class" else "View"
+                        if st.button(
+                            _btn_label, key="graph_view_btn", use_container_width=True
+                        ):
+                            _open_full_editor(ntype, ename)
+                else:
                     st.markdown(
                         f'<div id="graph-status-bar" style="background:#1e1e1e;color:#fff;padding:6px 12px;'
-                        f"border-radius:4px 0 0 4px;font-size:14px;display:flex;align-items:center;gap:8px;"
+                        f"border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;"
                         f'height:36px;">'
                         f'<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{sel_html}</span>'
                         f"</div>",
                         unsafe_allow_html=True,
                     )
-                with col_btn:
-                    # For classes we can land directly in the editor with the
-                    # entity preselected (no scrolling): switch to the
-                    # Edit/Delete tab and set its selectbox. Other types keep the
-                    # existing inline-view jump for now (issue #80).
-                    _btn_label = "Open full editor" if ntype == "Class" else "View"
-                    if st.button(
-                        _btn_label, key="graph_view_btn", use_container_width=True
-                    ):
-                        page = _type_to_page[ntype]
-                        st.session_state.search_navigate_to = page
-                        _jumped = False
-                        if ntype == "Class":
-                            _target = next(
-                                (c for c in classes if _uid(c["uri"]) == ename), None
-                            )
-                            if _target:
-                                _, _lookup = build_class_options(classes)
-                                _disp = {v: k for k, v in _lookup.items()}.get(
-                                    _target["uri"]
-                                )
-                                if _disp:
-                                    st.session_state["cls_active_tab"] = (
-                                        "Edit/Delete Class"
-                                    )
-                                    st.session_state["edit_class_select"] = _disp
-                                    _jumped = True
-                        if not _jumped:
-                            vk = _view_key_map[ntype](ename)
-                            st.session_state[vk] = True
-                            if ntype == "SKOS Concept":
-                                st.session_state["_skos_navigate_to_concept"] = True
-                        st.rerun()
-            else:
-                st.markdown(
-                    f'<div id="graph-status-bar" style="background:#1e1e1e;color:#fff;padding:6px 12px;'
-                    f"border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;"
-                    f'height:36px;">'
-                    f'<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{sel_html}</span>'
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
 
     if _viz_tab == "Class Hierarchy":
         st.subheader("Class Hierarchy (Text)")
@@ -6536,6 +6646,16 @@ def main():
             f'<a href="{ont_uri}" target="_blank" style="color:gray">{ont_uri}</a></p>',
             unsafe_allow_html=True,
         )
+
+    # "Back to graph" affordance after jumping to an editor from the
+    # Visualization panel / status bar (issue #80).
+    if selection == "Visualization":
+        st.session_state.pop("_back_to_viz", None)
+    elif st.session_state.get("_back_to_viz"):
+        if st.button("← Back to graph", key="back_to_viz"):
+            st.session_state.pop("_back_to_viz", None)
+            st.session_state.search_navigate_to = "Visualization"
+            st.rerun()
 
     # Render selected page
     try:
