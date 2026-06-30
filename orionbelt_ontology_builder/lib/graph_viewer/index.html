@@ -45,7 +45,6 @@ var pendingArgs = null;
 var network = null;
 var autofitOn = false;
 var lastSeq = null;
-var lastTheme = null;
 
 // When "Fit to window" is on, fill the available window height instead of using
 // the fixed Graph Height. Reads the parent window's height and this iframe's
@@ -64,6 +63,26 @@ function autofitHeight() {
 function applyHeight(h) {
     document.getElementById('graph').style.height = h + 'px';
     sendToStreamlit("streamlit:setFrameHeight", {height: h});
+}
+
+// Apply theme colours without rebuilding the graph, so a theme change (or the
+// first-render theme settling) doesn't reset the user's zoom/pan. Node colours
+// encode type, not theme, so only the background, overlays and edge labels change.
+function applyTheme(theme) {
+    theme = theme || {bg: '#ffffff', panel: 'rgba(255,255,255,0.92)', text: '#333333'};
+    document.documentElement.style.background = theme.bg;
+    document.body.style.background = theme.bg;
+    var dlBtn = document.getElementById('download-btn');
+    if (dlBtn) {
+        dlBtn.style.background = theme.panel;
+        var dlSvg = dlBtn.querySelector('svg');
+        if (dlSvg) dlSvg.style.fill = theme.text;
+    }
+    var legendEl = document.getElementById('legend');
+    if (legendEl) { legendEl.style.background = theme.panel; legendEl.style.color = theme.text; }
+    if (network) {
+        network.setOptions({edges: {font: {color: theme.text, strokeColor: theme.bg, strokeWidth: 4}}});
+    }
 }
 
 window.addEventListener('resize', function() {
@@ -85,12 +104,12 @@ function renderGraph(args) {
     if (!visLoaded) { pendingArgs = args; return; }
     autofitOn = !!args.autofit;
 
-    // Only rebuild the graph when the data (seq) or theme actually changes.
-    // Selection clicks trigger a Streamlit rerun + re-render with the same data;
-    // rebuilding then would reset the user's zoom/pan, so instead just update the
-    // selection and height and keep the existing network (and its viewport).
-    var themeStr = JSON.stringify(args.theme || null);
-    if (network && args.seq === lastSeq && themeStr === lastTheme) {
+    // Only rebuild the graph when the data (seq) changes. A selection click (or
+    // the first-render theme settling) is a same-data re-render; rebuilding then
+    // would reset the user's zoom/pan. So keep the existing network and its
+    // viewport, and just update the theme, selection and height.
+    if (network && args.seq === lastSeq) {
+        applyTheme(args.theme);
         if (args.selected_node !== null && args.selected_node !== undefined) {
             try { network.selectNodes([args.selected_node]); } catch (e) {}
         } else {
